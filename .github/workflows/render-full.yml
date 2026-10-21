@@ -1,0 +1,70 @@
+name: render-full
+# Полный рендер 3D-версии «Ломбарда»: 240 кадров на 20 машинах параллельно (EEVEE без видеокарты),
+# затем финальная сборка (дождь, свечение, цвет, звук) → готовый MP4 в артефактах.
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: "Сэмплы EEVEE"
+        default: "40"
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    env:
+      LOMBARD_FONT: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: llvmpipe
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libgles2 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 \
+            libxkbcommon0 libxkbcommon-x11-0 libsm6 libice6 libxi6 libxrender1 libxxf86vm1 libxfixes3 libx11-6 libxext6 \
+            libwayland-client0 libwayland-egl1 libdecor-0-0 fonts-dejavu-core
+      - name: Blender 5.2.2
+        run: |
+          curl -sL -o b.tar.xz https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz
+          tar xf b.tar.xz && mv blender-5.2.2-linux-x64 blender
+      - name: Build scene
+        run: ./blender/blender -b --python scene/lombard3d.py 2>&1 | grep -E "SAVED|Error|Traceback"
+      - name: Render frames
+        run: |
+          F0=$(( ${{ matrix.chunk }} * 12 + 1 )); F1=$(( F0 + 11 ))
+          ./blender/blender --gpu-backend opengl -b scene/lombard3d.blend --python scene/render3d.py -- \
+            lombard/3d/frames 1920 ${{ inputs.samples }} ${F0}-${F1} 2>&1 | grep -E "ENGINE|FRAME|DONE|Error|Traceback"
+          ls lombard/3d/frames | wc -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frames-${{ matrix.chunk }}
+          path: lombard/3d/frames/
+          retention-days: 7
+  assemble:
+    needs: render
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: frames-*
+          path: lombard/3d/frames
+          merge-multiple: true
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          python3 -m pip install -q --break-system-packages numpy opencv-python-headless pillow
+          ls lombard/3d/frames | wc -l
+      - name: Post (rain, glow, grade, sound) and encode
+        run: python3 lombard/3d/post3d.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lombard-3d-mp4
+          path: lombard/render/*.mp4
+          retention-days: 90
