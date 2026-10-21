@@ -1,0 +1,4 @@
+out/
+*.blend
+*.blend1
+.DS_Store
