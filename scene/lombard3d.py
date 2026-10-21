@@ -172,7 +172,7 @@ def mat_planks(name, c1, c2, rough=0.35, scale=1.0):
     return m
 
 
-def mat_image(name, image, emission=1.0, alpha=True, circle=False, flicker=None, mult=None):
+def mat_image(name, image, emission=1.0, alpha=True, circle=False, flicker=None, mult=None, lit=False):
     """Картинка без освещения (Emission) с прозрачностью; circle — мягкий круг (сцена в банке)."""
     m = bpy.data.materials.new(name)
     m.use_nodes = True
@@ -231,7 +231,16 @@ def mat_image(name, image, emission=1.0, alpha=True, circle=False, flicker=None,
         else:
             nt.links.new(a_out, gt.inputs[0]); nt.links.new(gt.outputs[0], mix.inputs[0])
         nt.links.new(tr.outputs[0], mix.inputs[1])
-        nt.links.new(em.outputs[0], mix.inputs[2])
+        if lit:                                   # карточка персонажа: эмиссия 0,6 + диффуз 0,4 — свет сцены красит фигурку
+            dif = nt.nodes.new("ShaderNodeBsdfDiffuse")
+            nt.links.new(tex.outputs["Color"], dif.inputs["Color"])
+            hyb = nt.nodes.new("ShaderNodeMixShader")
+            hyb.inputs[0].default_value = 0.4
+            nt.links.new(em.outputs[0], hyb.inputs[1])
+            nt.links.new(dif.outputs[0], hyb.inputs[2])
+            nt.links.new(hyb.outputs[0], mix.inputs[2])
+        else:
+            nt.links.new(em.outputs[0], mix.inputs[2])
         nt.links.new(mix.outputs[0], out.inputs["Surface"])
     else:
         nt.links.new(em.outputs[0], out.inputs["Surface"])
@@ -364,11 +373,41 @@ def card(name, image_name, height, loc, track_cam, emission=1.0):
     bm.free()
     ob = link(bpy.data.objects.new(name, me))
     ob.location = loc
-    me.materials.append(mat_image(name, im, emission))
+    me.materials.append(mat_image(name, im, emission, lit=True))
+    ob.visible_shadow = True
     c = ob.constraints.new("LOCKED_TRACK")
     c.target = track_cam
     c.track_axis = "TRACK_NEGATIVE_Y"
     c.lock_axis = "LOCK_Z"
+    ob.visible_shadow = False
+    return ob
+
+
+def blob_shadow(parent, width, strength=0.55):
+    """Контактная пятно-тень под стопами: мягкий тёмный эллипс на полу, едет с корнем персонажа."""
+    m = bpy.data.materials.new(parent.name + "_blob")
+    m.use_nodes = True
+    m.surface_render_method = "BLENDED"
+    nt = m.node_tree
+    for nd in list(nt.nodes):
+        if nd.type == "BSDF_PRINCIPLED":
+            nt.nodes.remove(nd)
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    sub = nt.nodes.new("ShaderNodeVectorMath"); sub.operation = "SUBTRACT"; sub.inputs[1].default_value = (0.5, 0.5, 0)
+    nt.links.new(tc.outputs["UV"], sub.inputs[0])
+    ln = nt.nodes.new("ShaderNodeVectorMath"); ln.operation = "LENGTH"
+    nt.links.new(sub.outputs[0], ln.inputs[0])
+    rp = nt.nodes.new("ShaderNodeMapRange")
+    rp.inputs["From Min"].default_value = 0.5; rp.inputs["From Max"].default_value = 0.1
+    rp.inputs["To Min"].default_value = 0.0; rp.inputs["To Max"].default_value = strength
+    nt.links.new(ln.outputs["Value"], rp.inputs["Value"])
+    tr = nt.nodes.new("ShaderNodeBsdfTransparent")
+    dk = nt.nodes.new("ShaderNodeBsdfDiffuse"); dk.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+    mx = nt.nodes.new("ShaderNodeMixShader")
+    nt.links.new(rp.outputs[0], mx.inputs[0]); nt.links.new(tr.outputs[0], mx.inputs[1]); nt.links.new(dk.outputs[0], mx.inputs[2])
+    nt.links.new(mx.outputs[0], nt.nodes["Material Output"].inputs["Surface"])
+    ob = plane(parent.name + "_shadow", width * 1.3, width * 0.5, (0, 0, 0.004), m, rot=(0, 0, 0))
+    ob.parent = parent
     ob.visible_shadow = False
     return ob
 
@@ -386,6 +425,7 @@ def pose_set(prefix, files, height, cam, emission=1.0, mirror=()):
             if flip:
                 c.scale = (-1, 1, 1)
             cards[f + ("~" if flip else "")] = c
+    blob_shadow(root, height * 0.3)
     return {"root": root, "cards": cards}
 
 
@@ -501,7 +541,7 @@ for nm, x0, x1, z0, z1 in (("df_l", 0.78, 0.86, 0, 2.65), ("df_r", 2.22, 2.3, 0,
     box(nm, x0, x1, -0.03, 0.1, z0, z1, frame_wood)
 hinge = link(bpy.data.objects.new("door_hinge", None))
 hinge.location = (2.22, 0.05, 0)
-door_parts = [box("door_low", 0.86, 2.22, 0.02, 0.08, 0.0, 1.05, frame_wood), box("door_top", 0.86, 2.22, 0.02, 0.08, 2.35, 2.58, frame_wood),
+door_parts = [box("door_low", 0.86, 2.22, 0.02, 0.08, 0.012, 1.05, frame_wood), box("door_top", 0.86, 2.22, 0.02, 0.08, 2.35, 2.58, frame_wood),
               box("door_side1", 0.86, 0.98, 0.02, 0.08, 1.05, 2.35, frame_wood), box("door_side2", 2.1, 2.22, 0.02, 0.08, 1.05, 2.35, frame_wood),
               plane("door_glass", 1.12, 1.3, (1.54, 0.05, 1.7), glass), cyl("door_handle", 0.025, 0.32, (1.0, -0.02, 1.15), brass)]
 for p_ in door_parts:
@@ -629,15 +669,24 @@ hero = HERO_POSES["root"]
 # стоит под дождём и смотрит на вывеску → два шага к двери (16 к на шаг, вверх на проходе) → тянется и толкает дверь → входит
 show_schedule(HERO_POSES, [(1, "hero_p1.png"), (40, "hero_p2.png"), (48, "hero_p1.png"), (56, "hero_p2.png~"), (64, "hero_p1.png"),
                            (74, "hero_p3.png"), (98, "hero_p2.png"), (106, "hero_p1.png")])
-for f, y, z in ((1, -1.4, 0.0), (40, -1.4, 0.0), (44, -1.26, -0.03), (48, -1.12, 0.012), (52, -0.98, 0.0), (56, -0.86, -0.03),
-                (60, -0.74, 0.012), (64, -0.64, 0.0), (72, -0.58, 0.0), (80, -0.54, 0.0), (94, -0.36, 0.0), (102, -0.05, -0.02),
-                (108, 0.22, 0.0)):
+# Ходьба: 2 рисунка на шаг (стоит / шаг), выдержка 8 к, N = 16 → корень прыгает на кадрах смены рисунка (Constant),
+# ΔY = S·h/N = 0,76·8/16 = 0,38 м за выдержку; между сменами корень стоит — опорная стопа в мире неподвижна.
+_prefs = bpy.context.preferences.edit
+for f, y, z in ((1, -1.4, 0.0), (40, -1.4, 0.0), (48, -1.02, 0.0), (56, -0.64, 0.0), (64, -0.64, 0.0), (72, -0.58, 0.0),
+                (80, -0.54, 0.0), (94, -0.36, 0.0), (102, -0.05, 0.0), (108, 0.22, 0.0)):
+    _prefs.keyframe_new_interpolation_type = "CONSTANT" if 40 <= f < 64 else "BEZIER"   # в 5.x у Action нет .fcurves
     hero.location = (1.35, y, z)
     hero.keyframe_insert("location", frame=f)
+_prefs.keyframe_new_interpolation_type = "BEZIER"
+# «нырок» перед сменой рисунка и перелёт после (правило 2.6): sy 0,97 → 1,02 → 1 на кадрах 47–48, 55–56, 63–64
+for swap in (48, 56, 64):
+    for f, sy in ((swap - 3, 1.0), (swap - 1, 0.97), (swap, 0.97), (swap + 2, 1.02), (swap + 6, 1.0)):
+        hero.scale = (1 + 0.5 * (1 - sy), 1, sy)
+        hero.keyframe_insert("scale", frame=f)
 for f, ang in ((1, 0.0), (74, 0.0), (80, 2.5), (90, 4.0), (98, 1.0), (108, 0.0)):        # наклон вперёд при толчке
     hero.rotation_euler = (math.radians(ang), 0, 0)
     hero.keyframe_insert("rotation_euler", frame=f)
-breathe(hero, 1, 40, 0.008, 3.4)
+breathe(hero, 1, 36, 0.008, 3.4)
 
 # ---------- ломбард ----------
 IN = dict(x0=-3.0, x1=3.0, y0=0.4, y1=9.0, h=4.0)
